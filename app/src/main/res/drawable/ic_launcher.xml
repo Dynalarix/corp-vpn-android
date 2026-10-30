@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Placeholder launcher icon: a shield on a dark circle. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FF0F1115"
+        android:pathData="M24,0a24,24 0,1 1,0 48a24,24 0,1 1,0 -48z" />
+    <path
+        android:fillColor="#FF4FC3F7"
+        android:pathData="M24,9l12,5v9c0,8 -5.2,14.6 -12,16.5c-6.8,-1.9 -12,-8.5 -12,-16.5v-9z" />
+</vector>
