@@ -1,5 +1,5 @@
 [versions]
-agp = "8.10.1"
+agp = "8.13.0"
 kotlin = "2.2.0"
 serialization = "1.8.1"
 composeBom = "2025.06.00"
@@ -21,10 +21,15 @@ compose-material-icons = { module = "androidx.compose.material:material-icons-ex
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 junit = { module = "junit:junit", version.ref = "junit" }
+# Used by the AmneziaWG tunnel module (third_party/amneziawg-android/tunnel).
+androidx-annotation = { module = "androidx.annotation:annotation", version = "1.7.1" }
+androidx-collection = { module = "androidx.collection:collection", version = "1.4.0" }
+jsr305 = { module = "com.google.code.findbugs:jsr305", version = "3.0.2" }
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

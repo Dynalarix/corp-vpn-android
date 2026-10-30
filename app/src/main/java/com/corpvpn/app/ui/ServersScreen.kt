@@ -1,5 +1,9 @@
 package com.corpvpn.app.ui
 
+import android.app.Activity
+import android.net.VpnService
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +31,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Card
@@ -55,9 +60,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.corpvpn.app.data.ConnectionState
 import com.corpvpn.core.Latency
 import com.corpvpn.core.Server
 
@@ -65,7 +72,12 @@ import com.corpvpn.core.Server
 @Composable
 fun ServersScreen(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val connection by viewModel.connection.collectAsStateWithLifecycle()
     val servers = state.servers
+    val context = LocalContext.current
+    val vpnPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) viewModel.connect()
+    }
     val snackbar = remember { SnackbarHostState() }
     var showImport by rememberSaveable { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<Server?>(null) }
@@ -99,7 +111,18 @@ fun ServersScreen(viewModel: MainViewModel) {
             }
         },
         bottomBar = {
-            if (servers.isNotEmpty()) ConnectBar(state, onConnect = viewModel::connect)
+            if (servers.isNotEmpty()) {
+                ConnectBar(
+                    state = state,
+                    connection = connection,
+                    onConnect = {
+                        // Android asks the user once to allow this app to run a VPN.
+                        val consent = VpnService.prepare(context)
+                        if (consent == null) viewModel.connect() else vpnPermission.launch(consent)
+                    },
+                    onDisconnect = viewModel::disconnect,
+                )
+            }
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
@@ -226,29 +249,55 @@ private fun pingColor(ms: Long): Color = when {
 }
 
 @Composable
-private fun ConnectBar(state: ServersUiState, onConnect: () -> Unit) {
+private fun ConnectBar(
+    state: ServersUiState,
+    connection: ConnectionState,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit,
+) {
     val target = state.target
+    val colors = MaterialTheme.colorScheme
+    val (status, statusColor) = when (connection) {
+        is ConnectionState.Connected ->
+            "Connected to ${connection.server.name} (${connection.key.protocol.displayName})" to Color(0xFF66BB6A)
+        is ConnectionState.Connecting ->
+            "Connecting to ${connection.server.name} (${connection.key.protocol.displayName})…" to colors.primary
+        is ConnectionState.Failed -> "Couldn't connect. ${connection.message}" to colors.error
+        ConnectionState.Disconnected -> when {
+            target == null && state.measuring -> "Measuring ping…"
+            target == null -> "No server answered"
+            state.manualHost != null -> "Chosen by you: ${target.name}. Tap it again for automatic choice."
+            else -> "Automatic: ${target.name} has the lowest ping"
+        } to colors.onSurfaceVariant
+    }
+    val active = connection is ConnectionState.Connected || connection is ConnectionState.Connecting
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
-        Text(
-            when {
-                target == null && state.measuring -> "Measuring ping…"
-                target == null -> "No server answered"
-                state.manualHost != null -> "Chosen by you: ${target.name}. Tap it again for automatic choice."
-                else -> "Automatic: ${target.name} has the lowest ping"
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Text(status, style = MaterialTheme.typography.bodySmall, color = statusColor)
         Spacer(Modifier.height(8.dp))
-        Button(onClick = onConnect, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+        Button(
+            onClick = if (active) onDisconnect else onConnect,
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+            colors = if (active) {
+                ButtonDefaults.buttonColors(containerColor = colors.surfaceVariant, contentColor = colors.onSurface)
+            } else {
+                ButtonDefaults.buttonColors()
+            },
+        ) {
             Icon(Icons.Filled.PowerSettingsNew, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text("Connect")
+            Text(
+                when (connection) {
+                    is ConnectionState.Connected -> "Disconnect"
+                    is ConnectionState.Connecting -> "Cancel"
+                    else -> "Connect"
+                },
+            )
         }
     }
 }

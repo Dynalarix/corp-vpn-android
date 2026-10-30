@@ -3,6 +3,8 @@ package com.corpvpn.app.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.corpvpn.app.CorpVpnApp
+import com.corpvpn.app.data.ConnectionState
 import com.corpvpn.app.data.KeyRepository
 import com.corpvpn.app.data.SystemLatencyProbe
 import com.corpvpn.core.KeyDecoder
@@ -12,6 +14,7 @@ import com.corpvpn.core.LatencyProbe
 import com.corpvpn.core.Server
 import com.corpvpn.core.VpnKey
 import com.corpvpn.core.bestServer
+import com.corpvpn.core.connectionCandidates
 import com.corpvpn.core.groupByServer
 import com.corpvpn.core.rankServers
 import kotlinx.coroutines.Dispatchers
@@ -43,12 +46,16 @@ data class ServersUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = KeyRepository(application)
     private val probe: LatencyProbe = SystemLatencyProbe()
+    private val tunnels = (application as CorpVpnApp).tunnels
+
+    val connection: StateFlow<ConnectionState> = tunnels.state
 
     private val keys = MutableStateFlow<List<VpnKey>>(emptyList())
     private val latencies = MutableStateFlow<Map<String, Latency>>(emptyMap())
     private val manualHost = MutableStateFlow<String?>(null)
     private val measuring = MutableStateFlow(false)
     private var measureJob: Job? = null
+    private var connectJob: Job? = null
 
     val state: StateFlow<ServersUiState> =
         combine(keys, latencies, manualHost, measuring) { keys, latencies, manual, measuring ->
@@ -105,20 +112,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Re-measures, then reports which server would be used. The actual tunnel is
-     * started here in the next step.
+     * Connects to the manually chosen server, or re-measures and uses the best one.
+     * If that fails, the other key and then the next-best servers are tried.
+     * The VPN permission must be granted before this is called.
      */
     fun connect() {
-        viewModelScope.launch {
+        connectJob?.cancel()
+        connectJob = viewModelScope.launch {
             if (state.value.manualHost == null) measureAll().join()
-            val target = state.value.target
+            val current = state.value
+            val target = current.target
             if (target == null) {
                 _messages.send("No server answered. Check your internet connection and try again.")
                 return@launch
             }
-            val ping = (state.value.latencies[target.host] as? Latency.Ms)?.let { " (${it.value} ms)" }.orEmpty()
-            _messages.send("Selected ${target.name}$ping. Connecting is coming in the next update.")
+            tunnels.connect(connectionCandidates(target, current.servers, current.latencies))
         }
+    }
+
+    fun disconnect() {
+        connectJob?.cancel()
+        viewModelScope.launch { tunnels.disconnect() }
     }
 
     fun import(input: String) {

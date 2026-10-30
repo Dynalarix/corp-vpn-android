@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.corpvpn.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.corpvpn.app"
@@ -17,6 +17,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Lets a debug build sit next to a release build; the tunnel library
+            // uses the same suffix for its native socket paths.
+            applicationIdSuffix = ".debug"
+        }
         release {
             isMinifyEnabled = false
         }
@@ -40,6 +45,7 @@ kotlin {
 
 dependencies {
     implementation(project(":core"))
+    implementation(project(":tunnel"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
