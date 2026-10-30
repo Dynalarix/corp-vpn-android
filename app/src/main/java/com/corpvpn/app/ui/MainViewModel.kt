@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.corpvpn.app.CorpVpnApp
 import com.corpvpn.app.data.CheckListRepository
+import com.corpvpn.app.data.CheckListSettings
 import com.corpvpn.app.data.ConnectionState
 import com.corpvpn.app.data.KeyRepository
 import com.corpvpn.app.data.SystemLatencyProbe
@@ -77,6 +78,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, ServersUiState())
 
+    private val _checkListSettings = MutableStateFlow<CheckListSettings?>(null)
+    /** Null until loaded. */
+    val checkListSettings: StateFlow<CheckListSettings?> = _checkListSettings
+    private val _checkListUpdating = MutableStateFlow(false)
+    val checkListUpdating: StateFlow<Boolean> = _checkListUpdating
+
     private val _messages = Channel<String>(Channel.BUFFERED)
     /** One-off messages for the snackbar. */
     val messages = _messages.receiveAsFlow()
@@ -85,6 +92,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             keys.value = withContext(Dispatchers.IO) { repository.load() }
             measureAll()
+        }
+        viewModelScope.launch {
+            _checkListSettings.value = withContext(Dispatchers.IO) { checkList.load() }
+            refreshCheckList()
         }
     }
 
@@ -137,7 +148,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _messages.send("No server answered. Check your internet connection and try again.")
                 return@launch
             }
-            val sites = withContext(Dispatchers.IO) { checkList.sites() }
+            // Pick up changes to the shared list before checking against it.
+            if (mode == ConnectMode.VERIFIED) refreshCheckList()
+            val sites = withContext(Dispatchers.IO) { checkList.load().sites }
             problems.value = emptyMap()
             tunnels.connect(mode, target, current.servers, current.latencies, sites) { event ->
                 if (event is ConnectEvent.ServerFailed) problems.update { it + (event.server.host to event) }
@@ -148,6 +161,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun disconnect() {
         connectJob?.cancel()
         viewModelScope.launch { tunnels.disconnect() }
+    }
+
+    fun saveCheckList(manualText: String, url: String) {
+        viewModelScope.launch {
+            val urlChanged = withContext(Dispatchers.IO) {
+                val changed = checkList.load().url != url.trim()
+                checkList.saveManual(manualText)
+                checkList.saveUrl(url)
+                changed
+            }
+            _checkListSettings.value = withContext(Dispatchers.IO) { checkList.load() }
+            if (urlChanged) refreshCheckList()
+        }
+    }
+
+    /** Downloads the shared list again, if a link is set. Keeps the old copy on failure. */
+    suspend fun refreshCheckList() {
+        if (_checkListSettings.value?.url.isNullOrEmpty()) return
+        _checkListUpdating.value = true
+        try {
+            _checkListSettings.value = checkList.refresh()
+        } finally {
+            _checkListUpdating.value = false
+        }
+    }
+
+    fun updateCheckListNow() {
+        viewModelScope.launch { refreshCheckList() }
     }
 
     fun import(input: String) {
