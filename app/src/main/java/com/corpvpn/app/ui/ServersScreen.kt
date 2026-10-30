@@ -41,6 +41,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -65,7 +66,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.corpvpn.app.data.ConnectionState
+import com.corpvpn.core.CheckList
+import com.corpvpn.core.ConnectEvent
+import com.corpvpn.core.ConnectMode
 import com.corpvpn.core.Latency
+import com.corpvpn.core.ServerProblem
 import com.corpvpn.core.Server
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -75,8 +80,9 @@ fun ServersScreen(viewModel: MainViewModel) {
     val connection by viewModel.connection.collectAsStateWithLifecycle()
     val servers = state.servers
     val context = LocalContext.current
+    var pendingMode by remember { mutableStateOf(ConnectMode.NEAREST) }
     val vpnPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) viewModel.connect()
+        if (result.resultCode == Activity.RESULT_OK) viewModel.connect(pendingMode)
     }
     val snackbar = remember { SnackbarHostState() }
     var showImport by rememberSaveable { mutableStateOf(false) }
@@ -115,10 +121,15 @@ fun ServersScreen(viewModel: MainViewModel) {
                 ConnectBar(
                     state = state,
                     connection = connection,
-                    onConnect = {
+                    onConnect = { mode ->
                         // Android asks the user once to allow this app to run a VPN.
                         val consent = VpnService.prepare(context)
-                        if (consent == null) viewModel.connect() else vpnPermission.launch(consent)
+                        if (consent == null) {
+                            viewModel.connect(mode)
+                        } else {
+                            pendingMode = mode
+                            vpnPermission.launch(consent)
+                        }
                     },
                     onDisconnect = viewModel::disconnect,
                 )
@@ -138,6 +149,7 @@ fun ServersScreen(viewModel: MainViewModel) {
                     ServerCard(
                         server = server,
                         latency = state.latencies[server.host],
+                        problem = state.problems[server.host],
                         isTarget = server.host == state.target?.host,
                         isPinned = server.host == state.manualHost,
                         onClick = { viewModel.toggleManual(server) },
@@ -178,12 +190,18 @@ fun ServersScreen(viewModel: MainViewModel) {
 private fun ServerCard(
     server: Server,
     latency: Latency?,
+    problem: ConnectEvent.ServerFailed?,
     isTarget: Boolean,
     isPinned: Boolean,
     onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    val statusColor = when {
+        problem != null || latency == Latency.Unreachable -> Bad
+        latency is Latency.Ms -> Good
+        else -> colors.onSurfaceVariant
+    }
     Card(
         colors = CardDefaults.cardColors(containerColor = if (isTarget) colors.surfaceVariant else colors.surface),
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
@@ -195,7 +213,7 @@ private fun ServerCard(
             Icon(
                 if (isPinned) Icons.Filled.PushPin else Icons.Outlined.Dns,
                 contentDescription = if (isPinned) "Chosen manually" else null,
-                tint = colors.primary,
+                tint = statusColor,
             )
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
@@ -216,8 +234,23 @@ private fun ServerCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant,
                 )
+                problem?.let {
+                    Text(
+                        when (it.problem) {
+                            ServerProblem.CONNECT_FAILED -> "Couldn't connect"
+                            ServerProblem.SITES_FAILED ->
+                                "Not opening: " + it.failedSites.joinToString { site -> CheckList.displayName(site) }
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Bad,
+                    )
+                }
             }
-            PingLabel(latency)
+            when (latency) {
+                is Latency.Ms -> Text("${latency.value} ms", style = MaterialTheme.typography.labelLarge, color = statusColor)
+                Latency.Unreachable -> Text("no reply", style = MaterialTheme.typography.labelLarge, color = Bad)
+                Latency.Measuring, null -> CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            }
             IconButton(onClick = onDelete) {
                 Icon(Icons.Outlined.Delete, contentDescription = "Remove server")
             }
@@ -225,52 +258,35 @@ private fun ServerCard(
     }
 }
 
-@Composable
-private fun PingLabel(latency: Latency?) {
-    when (latency) {
-        is Latency.Ms -> Text(
-            "${latency.value} ms",
-            style = MaterialTheme.typography.labelLarge,
-            color = pingColor(latency.value),
-        )
-        Latency.Unreachable -> Text(
-            "no reply",
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.error,
-        )
-        Latency.Measuring, null -> CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-    }
-}
-
-private fun pingColor(ms: Long): Color = when {
-    ms < 80 -> Color(0xFF66BB6A)
-    ms < 200 -> Color(0xFFFFCA28)
-    else -> Color(0xFFFF7043)
-}
+private val Good = Color(0xFF66BB6A)
+private val Bad = Color(0xFFFF6B6B)
 
 @Composable
 private fun ConnectBar(
     state: ServersUiState,
     connection: ConnectionState,
-    onConnect: () -> Unit,
+    onConnect: (ConnectMode) -> Unit,
     onDisconnect: () -> Unit,
 ) {
     val target = state.target
     val colors = MaterialTheme.colorScheme
     val (status, statusColor) = when (connection) {
-        is ConnectionState.Connected ->
-            "Connected to ${connection.server.name} (${connection.key.protocol.displayName})" to Color(0xFF66BB6A)
+        is ConnectionState.Connected -> {
+            val how = if (connection.verified) "check sites open" else connection.key.protocol.displayName
+            "Connected to ${connection.server.name} ($how)" to Good
+        }
         is ConnectionState.Connecting ->
             "Connecting to ${connection.server.name} (${connection.key.protocol.displayName})…" to colors.primary
-        is ConnectionState.Failed -> "Couldn't connect. ${connection.message}" to colors.error
+        is ConnectionState.Checking -> "Checking sites through ${connection.server.name}…" to colors.primary
+        is ConnectionState.Failed -> connection.message to Bad
         ConnectionState.Disconnected -> when {
             target == null && state.measuring -> "Measuring ping…"
             target == null -> "No server answered"
             state.manualHost != null -> "Chosen by you: ${target.name}. Tap it again for automatic choice."
-            else -> "Automatic: ${target.name} has the lowest ping"
+            else -> "Nearest: ${target.name}"
         } to colors.onSurfaceVariant
     }
-    val active = connection is ConnectionState.Connected || connection is ConnectionState.Connecting
+    val busy = connection is ConnectionState.Connecting || connection is ConnectionState.Checking
 
     Column(
         modifier = Modifier
@@ -280,24 +296,31 @@ private fun ConnectBar(
     ) {
         Text(status, style = MaterialTheme.typography.bodySmall, color = statusColor)
         Spacer(Modifier.height(8.dp))
-        Button(
-            onClick = if (active) onDisconnect else onConnect,
-            modifier = Modifier.fillMaxWidth().height(52.dp),
-            colors = if (active) {
-                ButtonDefaults.buttonColors(containerColor = colors.surfaceVariant, contentColor = colors.onSurface)
-            } else {
-                ButtonDefaults.buttonColors()
-            },
-        ) {
-            Icon(Icons.Filled.PowerSettingsNew, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text(
-                when (connection) {
-                    is ConnectionState.Connected -> "Disconnect"
-                    is ConnectionState.Connecting -> "Cancel"
-                    else -> "Connect"
-                },
-            )
+        if (connection is ConnectionState.Connected || busy) {
+            Button(
+                onClick = onDisconnect,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = colors.surfaceVariant, contentColor = colors.onSurface),
+            ) {
+                Icon(Icons.Filled.PowerSettingsNew, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(if (busy) "Cancel" else "Disconnect")
+            }
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(
+                    onClick = { onConnect(ConnectMode.NEAREST) },
+                    modifier = Modifier.weight(1f).heightIn(min = 52.dp),
+                ) {
+                    Text(if (state.manualHost != null) "Connect to selected" else "Connect to nearest", textAlign = TextAlign.Center)
+                }
+                Button(
+                    onClick = { onConnect(ConnectMode.VERIFIED) },
+                    modifier = Modifier.weight(1f).heightIn(min = 52.dp),
+                ) {
+                    Text("Connect to verified", textAlign = TextAlign.Center)
+                }
+            }
         }
     }
 }

@@ -4,9 +4,12 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.corpvpn.app.CorpVpnApp
+import com.corpvpn.app.data.CheckListRepository
 import com.corpvpn.app.data.ConnectionState
 import com.corpvpn.app.data.KeyRepository
 import com.corpvpn.app.data.SystemLatencyProbe
+import com.corpvpn.core.ConnectEvent
+import com.corpvpn.core.ConnectMode
 import com.corpvpn.core.KeyDecoder
 import com.corpvpn.core.KeyImportException
 import com.corpvpn.core.Latency
@@ -14,7 +17,6 @@ import com.corpvpn.core.LatencyProbe
 import com.corpvpn.core.Server
 import com.corpvpn.core.VpnKey
 import com.corpvpn.core.bestServer
-import com.corpvpn.core.connectionCandidates
 import com.corpvpn.core.groupByServer
 import com.corpvpn.core.rankServers
 import kotlinx.coroutines.Dispatchers
@@ -41,12 +43,15 @@ data class ServersUiState(
     val target: Server? = null,
     val manualHost: String? = null,
     val measuring: Boolean = false,
+    /** Servers that failed during the last connect attempt, and why. Cleared by a new ping round. */
+    val problems: Map<String, ConnectEvent.ServerFailed> = emptyMap(),
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = KeyRepository(application)
     private val probe: LatencyProbe = SystemLatencyProbe()
     private val tunnels = (application as CorpVpnApp).tunnels
+    private val checkList = CheckListRepository(application)
 
     val connection: StateFlow<ConnectionState> = tunnels.state
 
@@ -54,11 +59,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val latencies = MutableStateFlow<Map<String, Latency>>(emptyMap())
     private val manualHost = MutableStateFlow<String?>(null)
     private val measuring = MutableStateFlow(false)
+    private val problems = MutableStateFlow<Map<String, ConnectEvent.ServerFailed>>(emptyMap())
     private var measureJob: Job? = null
     private var connectJob: Job? = null
 
     val state: StateFlow<ServersUiState> =
-        combine(keys, latencies, manualHost, measuring) { keys, latencies, manual, measuring ->
+        combine(keys, latencies, manualHost, measuring, problems) { keys, latencies, manual, measuring, problems ->
             val servers = keys.groupByServer()
             val manualServer = servers.firstOrNull { it.host == manual }
             ServersUiState(
@@ -67,6 +73,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 target = manualServer ?: bestServer(servers, latencies),
                 manualHost = manualServer?.host,
                 measuring = measuring,
+                problems = problems,
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, ServersUiState())
 
@@ -88,6 +95,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val hosts = keys.value.groupByServer().map { it.host }
             if (hosts.isEmpty()) return@launch
             measuring.value = true
+            problems.value = emptyMap()
             latencies.update { old -> hosts.associateWith { old[it] ?: Latency.Measuring } }
             try {
                 measure(hosts)
@@ -112,13 +120,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Connects to the manually chosen server, or re-measures and uses the best one.
-     * If that fails, the other key and then the next-best servers are tried.
+     * [ConnectMode.NEAREST]: the chosen server, else the lowest ping.
+     * [ConnectMode.VERIFIED]: the same, but the check sites must open through the VPN,
+     * otherwise the next server is tried.
      * The VPN permission must be granted before this is called.
      */
-    fun connect() {
+    fun connect(mode: ConnectMode) {
         connectJob?.cancel()
         connectJob = viewModelScope.launch {
+            // Ping through an open tunnel would be meaningless, so start from a clean state.
+            if (connection.value !is ConnectionState.Disconnected) tunnels.disconnect()
             if (state.value.manualHost == null) measureAll().join()
             val current = state.value
             val target = current.target
@@ -126,7 +137,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _messages.send("No server answered. Check your internet connection and try again.")
                 return@launch
             }
-            tunnels.connect(connectionCandidates(target, current.servers, current.latencies))
+            val sites = withContext(Dispatchers.IO) { checkList.sites() }
+            problems.value = emptyMap()
+            tunnels.connect(mode, target, current.servers, current.latencies, sites) { event ->
+                if (event is ConnectEvent.ServerFailed) problems.update { it + (event.server.host to event) }
+            }
         }
     }
 

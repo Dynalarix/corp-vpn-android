@@ -1,7 +1,13 @@
 package com.corpvpn.app.data
 
 import android.content.Context
+import com.corpvpn.core.ConnectEvent
+import com.corpvpn.core.ConnectMode
+import com.corpvpn.core.ConnectResult
+import com.corpvpn.core.Connector
+import com.corpvpn.core.Latency
 import com.corpvpn.core.Server
+import com.corpvpn.core.TunnelControl
 import com.corpvpn.core.VpnKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -18,7 +24,8 @@ import java.io.StringReader
 sealed interface ConnectionState {
     data object Disconnected : ConnectionState
     data class Connecting(val server: Server, val key: VpnKey) : ConnectionState
-    data class Connected(val server: Server, val key: VpnKey) : ConnectionState
+    data class Checking(val server: Server, val key: VpnKey) : ConnectionState
+    data class Connected(val server: Server, val key: VpnKey, val verified: Boolean) : ConnectionState
     data class Failed(val message: String) : ConnectionState
 }
 
@@ -37,35 +44,48 @@ class TunnelManager(context: Context) {
         }
     }
 
+    private val control = object : TunnelControl {
+        override suspend fun up(key: VpnKey): Boolean = withContext(Dispatchers.IO) {
+            val config = Config.parse(BufferedReader(StringReader(key.config)))
+            backend.setState(tunnel, Tunnel.State.UP, config)
+            awaitHandshake()
+        }
+
+        override suspend fun down() {
+            withContext(Dispatchers.IO) { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+        }
+    }
+
+    private val connector = Connector(control, HttpSiteCheck())
+
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
-    /**
-     * Tries each (server, key) in order until one completes a handshake. The VPN
-     * permission must already be granted (see VpnService.prepare).
-     */
-    suspend fun connect(candidates: List<Pair<Server, VpnKey>>) = withContext(Dispatchers.IO) {
-        var lastError: String? = null
-        for ((server, key) in candidates) {
-            _state.value = ConnectionState.Connecting(server, key)
-            try {
-                val config = Config.parse(BufferedReader(StringReader(key.config)))
-                backend.setState(tunnel, Tunnel.State.UP, config)
-                if (awaitHandshake()) {
-                    _state.value = ConnectionState.Connected(server, key)
-                    return@withContext
-                }
-                lastError = "${server.name} did not answer over ${key.protocol.displayName}."
-            } catch (e: Exception) {
-                lastError = "${server.name}: ${e.message ?: e.javaClass.simpleName}"
+    /** The VPN permission must already be granted (see VpnService.prepare). */
+    suspend fun connect(
+        mode: ConnectMode,
+        target: Server,
+        servers: List<Server>,
+        latencies: Map<String, Latency>,
+        sites: List<String>,
+        onEvent: (ConnectEvent) -> Unit,
+    ) {
+        val result = connector.connect(mode, target, servers, latencies, sites) { event ->
+            when (event) {
+                is ConnectEvent.Trying -> _state.value = ConnectionState.Connecting(event.server, event.key)
+                is ConnectEvent.Checking -> _state.value = ConnectionState.Checking(event.server, event.key)
+                is ConnectEvent.ServerFailed -> Unit
             }
-            runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+            onEvent(event)
         }
-        _state.value = ConnectionState.Failed(lastError ?: "No keys to connect with.")
+        _state.value = when (result) {
+            is ConnectResult.Connected -> ConnectionState.Connected(result.server, result.key, result.verified)
+            is ConnectResult.Failed -> ConnectionState.Failed(result.message)
+        }
     }
 
-    suspend fun disconnect() = withContext(Dispatchers.IO) {
-        runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+    suspend fun disconnect() {
+        runCatching { control.down() }
         _state.value = ConnectionState.Disconnected
     }
 
