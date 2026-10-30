@@ -33,7 +33,11 @@ sealed interface ConnectionState {
  * Runs the WireGuard / AmneziaWG tunnel through the AmneziaWG Go backend, which
  * speaks both protocols. Only one tunnel is up at a time.
  */
-class TunnelManager(context: Context, private val appRules: AppRulesRepository) {
+class TunnelManager(
+    context: Context,
+    private val appRules: AppRulesRepository,
+    private val siteRules: SiteRulesRepository,
+) {
     private val backend = GoBackend(context.applicationContext)
     private val tunnel = object : Tunnel {
         override fun getName() = TUNNEL_NAME
@@ -44,9 +48,12 @@ class TunnelManager(context: Context, private val appRules: AppRulesRepository) 
         }
     }
 
+    /** Site rules for the current connection; domains are resolved once per connect. */
+    private var applySiteRules: (String) -> String = { it }
+
     private val control = object : TunnelControl {
         override suspend fun up(key: VpnKey): Boolean = withContext(Dispatchers.IO) {
-            val config = Config.parse(BufferedReader(StringReader(appRules.applyTo(key.config))))
+            val config = Config.parse(BufferedReader(StringReader(applySiteRules(appRules.applyTo(key.config)))))
             backend.setState(tunnel, Tunnel.State.UP, config)
             awaitHandshake()
         }
@@ -70,6 +77,8 @@ class TunnelManager(context: Context, private val appRules: AppRulesRepository) 
         sites: List<String>,
         onEvent: (ConnectEvent) -> Unit,
     ) {
+        // Resolve while the VPN is down, so domains get the addresses the phone's own network sees.
+        applySiteRules = siteRules.prepare(sites)
         val result = connector.connect(mode, target, servers, latencies, sites) { event ->
             when (event) {
                 is ConnectEvent.Trying -> _state.value = ConnectionState.Connecting(event.server, event.key)
