@@ -43,9 +43,9 @@ data class AppRules(
         if (header < 0) throw KeyImportException("The config has no [Interface] section.")
         return (lines.take(header + 1) + rule + lines.drop(header + 1)).joinToString("\n")
     }
-
-    private companion object {
-        const val EXCLUDED = "ExcludedApplications"
-        const val INCLUDED = "IncludedApplications"
-    }
 }
+
+// Top level rather than in a private companion: a private companion would also
+// hide the serializer() that the serialization plugin adds to it.
+private const val EXCLUDED = "ExcludedApplications"
+private const val INCLUDED = "IncludedApplications"
