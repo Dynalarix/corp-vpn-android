@@ -4,35 +4,121 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.corpvpn.app.data.KeyRepository
+import com.corpvpn.app.data.SystemLatencyProbe
 import com.corpvpn.core.KeyDecoder
 import com.corpvpn.core.KeyImportException
+import com.corpvpn.core.Latency
+import com.corpvpn.core.LatencyProbe
 import com.corpvpn.core.Server
 import com.corpvpn.core.VpnKey
+import com.corpvpn.core.bestServer
 import com.corpvpn.core.groupByServer
+import com.corpvpn.core.rankServers
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+data class ServersUiState(
+    /** Best first. */
+    val servers: List<Server> = emptyList(),
+    val latencies: Map<String, Latency> = emptyMap(),
+    /** The server Connect will use: the manual pick if any, else the best by ping. */
+    val target: Server? = null,
+    val manualHost: String? = null,
+    val measuring: Boolean = false,
+)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = KeyRepository(application)
-    private val keys = MutableStateFlow<List<VpnKey>>(emptyList())
+    private val probe: LatencyProbe = SystemLatencyProbe()
 
-    val servers: StateFlow<List<Server>> = keys
-        .map { it.groupByServer() }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    private val keys = MutableStateFlow<List<VpnKey>>(emptyList())
+    private val latencies = MutableStateFlow<Map<String, Latency>>(emptyMap())
+    private val manualHost = MutableStateFlow<String?>(null)
+    private val measuring = MutableStateFlow(false)
+    private var measureJob: Job? = null
+
+    val state: StateFlow<ServersUiState> =
+        combine(keys, latencies, manualHost, measuring) { keys, latencies, manual, measuring ->
+            val servers = keys.groupByServer()
+            val manualServer = servers.firstOrNull { it.host == manual }
+            ServersUiState(
+                servers = rankServers(servers, latencies),
+                latencies = latencies,
+                target = manualServer ?: bestServer(servers, latencies),
+                manualHost = manualServer?.host,
+                measuring = measuring,
+            )
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, ServersUiState())
 
     private val _messages = Channel<String>(Channel.BUFFERED)
     /** One-off messages for the snackbar. */
     val messages = _messages.receiveAsFlow()
 
     init {
-        viewModelScope.launch(Dispatchers.IO) { keys.value = repository.load() }
+        viewModelScope.launch {
+            keys.value = withContext(Dispatchers.IO) { repository.load() }
+            measureAll()
+        }
+    }
+
+    /** Pings every server in parallel. A newer call cancels one still running. */
+    fun measureAll(): Job {
+        measureJob?.cancel()
+        return viewModelScope.launch {
+            val hosts = keys.value.groupByServer().map { it.host }
+            if (hosts.isEmpty()) return@launch
+            measuring.value = true
+            latencies.update { old -> hosts.associateWith { old[it] ?: Latency.Measuring } }
+            try {
+                measure(hosts)
+            } finally {
+                measuring.value = false
+            }
+        }.also { measureJob = it }
+    }
+
+    private suspend fun measure(hosts: List<String>) = coroutineScope {
+        hosts.map { host ->
+            async(Dispatchers.IO) {
+                val ms = probe.measure(host)
+                latencies.update { it + (host to (ms?.let(Latency::Ms) ?: Latency.Unreachable)) }
+            }
+        }.awaitAll()
+    }
+
+    /** Tapping a server pins it; tapping the pinned one goes back to automatic choice. */
+    fun toggleManual(server: Server) {
+        manualHost.update { if (it == server.host) null else server.host }
+    }
+
+    /**
+     * Re-measures, then reports which server would be used. The actual tunnel is
+     * started here in the next step.
+     */
+    fun connect() {
+        viewModelScope.launch {
+            if (state.value.manualHost == null) measureAll().join()
+            val target = state.value.target
+            if (target == null) {
+                _messages.send("No server answered. Check your internet connection and try again.")
+                return@launch
+            }
+            val ping = (state.value.latencies[target.host] as? Latency.Ms)?.let { " (${it.value} ms)" }.orEmpty()
+            _messages.send("Selected ${target.name}$ping. Connecting is coming in the next update.")
+        }
     }
 
     fun import(input: String) {
@@ -53,6 +139,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.save(updated)
             keys.value = updated
             _messages.send("Added ${added.first().name} (${added.joinToString { it.protocol.displayName }}).")
+            withContext(Dispatchers.Main) { measureAll() }
         }
     }
 
@@ -62,6 +149,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val updated = keys.value.filter { it.id !in ids }
             repository.save(updated)
             keys.value = updated
+            latencies.update { it - server.host }
+            manualHost.update { if (it == server.host) null else it }
         }
     }
 }

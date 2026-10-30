@@ -1,5 +1,6 @@
 package com.corpvpn.app.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -8,7 +9,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -16,14 +20,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -43,16 +52,20 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.corpvpn.core.Latency
 import com.corpvpn.core.Server
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ServersScreen(viewModel: MainViewModel) {
-    val servers by viewModel.servers.collectAsStateWithLifecycle()
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val servers = state.servers
     val snackbar = remember { SnackbarHostState() }
     var showImport by rememberSaveable { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<Server?>(null) }
@@ -69,14 +82,24 @@ fun ServersScreen(viewModel: MainViewModel) {
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background,
                 ),
+                actions = {
+                    if (state.measuring) {
+                        CircularProgressIndicator(Modifier.padding(12.dp).size(24.dp), strokeWidth = 2.dp)
+                    } else if (servers.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.measureAll() }) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Measure ping again")
+                        }
+                    }
+                },
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { showImport = true },
-                icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                text = { Text("Add key") },
-            )
+            FloatingActionButton(onClick = { showImport = true }) {
+                Icon(Icons.Filled.Add, contentDescription = "Add key")
+            }
+        },
+        bottomBar = {
+            if (servers.isNotEmpty()) ConnectBar(state, onConnect = viewModel::connect)
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
@@ -85,11 +108,18 @@ fun ServersScreen(viewModel: MainViewModel) {
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 88.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 items(servers, key = { it.host }) { server ->
-                    ServerCard(server, onDelete = { pendingDelete = server })
+                    ServerCard(
+                        server = server,
+                        latency = state.latencies[server.host],
+                        isTarget = server.host == state.target?.host,
+                        isPinned = server.host == state.manualHost,
+                        onClick = { viewModel.toggleManual(server) },
+                        onDelete = { pendingDelete = server },
+                    )
                 }
             }
         }
@@ -122,25 +152,49 @@ fun ServersScreen(viewModel: MainViewModel) {
 }
 
 @Composable
-private fun ServerCard(server: Server, onDelete: () -> Unit) {
+private fun ServerCard(
+    server: Server,
+    latency: Latency?,
+    isTarget: Boolean,
+    isPinned: Boolean,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
     Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = if (isTarget) colors.surfaceVariant else colors.surface),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Outlined.Dns, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Icon(
+                if (isPinned) Icons.Filled.PushPin else Icons.Outlined.Dns,
+                contentDescription = if (isPinned) "Chosen manually" else null,
+                tint = colors.primary,
+            )
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
-                Text(server.name, style = MaterialTheme.typography.titleMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(server.name, style = MaterialTheme.typography.titleMedium)
+                    if (isTarget) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (isPinned) "SELECTED" else "BEST",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.primary,
+                        )
+                    }
+                }
                 Text(
                     "${server.host} · " + server.keys.joinToString { it.protocol.displayName },
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = colors.onSurfaceVariant,
                 )
             }
+            PingLabel(latency)
             IconButton(onClick = onDelete) {
                 Icon(Icons.Outlined.Delete, contentDescription = "Remove server")
             }
@@ -149,10 +203,61 @@ private fun ServerCard(server: Server, onDelete: () -> Unit) {
 }
 
 @Composable
+private fun PingLabel(latency: Latency?) {
+    when (latency) {
+        is Latency.Ms -> Text(
+            "${latency.value} ms",
+            style = MaterialTheme.typography.labelLarge,
+            color = pingColor(latency.value),
+        )
+        Latency.Unreachable -> Text(
+            "no reply",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.error,
+        )
+        Latency.Measuring, null -> CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+    }
+}
+
+private fun pingColor(ms: Long): Color = when {
+    ms < 80 -> Color(0xFF66BB6A)
+    ms < 200 -> Color(0xFFFFCA28)
+    else -> Color(0xFFFF7043)
+}
+
+@Composable
+private fun ConnectBar(state: ServersUiState, onConnect: () -> Unit) {
+    val target = state.target
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        Text(
+            when {
+                target == null && state.measuring -> "Measuring ping…"
+                target == null -> "No server answered"
+                state.manualHost != null -> "Chosen by you: ${target.name}. Tap it again for automatic choice."
+                else -> "Automatic: ${target.name} has the lowest ping"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = onConnect, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+            Icon(Icons.Filled.PowerSettingsNew, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Connect")
+        }
+    }
+}
+
+@Composable
 private fun EmptyState(modifier: Modifier) {
     Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Text(
-            "No servers yet.\nGet your vpn:// key from the company portal, then tap \"Add key\" or open the link on this phone.",
+            "No servers yet.\nGet your vpn:// key from the company portal, then tap + or open the link on this phone.",
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

@@ -21,5 +21,5 @@ each run as an artifact.
 ## Status
 
 1. Import keys – done
-2. Server list with ping and auto-pick – next
-3. Connect over WireGuard / AmneziaWG
+2. Server list with ping and auto-pick – done
+3. Connect over WireGuard / AmneziaWG – next
