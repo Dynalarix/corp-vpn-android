@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -76,7 +77,7 @@ import com.corpvpn.core.Server
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ServersScreen(viewModel: MainViewModel, onOpenCheckList: () -> Unit) {
+fun ServersScreen(viewModel: MainViewModel, onOpenCheckList: () -> Unit, onOpenApps: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val connection by viewModel.connection.collectAsStateWithLifecycle()
     val servers = state.servers
@@ -102,6 +103,9 @@ fun ServersScreen(viewModel: MainViewModel, onOpenCheckList: () -> Unit) {
                     containerColor = MaterialTheme.colorScheme.background,
                 ),
                 actions = {
+                    IconButton(onClick = onOpenApps) {
+                        Icon(Icons.Filled.Apps, contentDescription = "Split tunneling")
+                    }
                     IconButton(onClick = onOpenCheckList) {
                         Icon(Icons.Filled.Checklist, contentDescription = "Check sites")
                     }
